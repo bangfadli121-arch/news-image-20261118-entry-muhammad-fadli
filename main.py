@@ -1,14 +1,19 @@
-"""news-image-20261118 entry program (Python 3.13, standard library only).
+#!/usr/bin/env python3
+"""Copy the news-image-20261118 entry image to the output directory.
 
-The entry image is the entry.png held in this repository. The program copies
-it to the output directory as entry.png, after validating that it is a whole
-PNG of 1024 by 1024 pixels and at most 1 MiB, and prints its sha256.
+The image lives in this repository as entry.png. The program checks it is
+really the entry image -- a complete PNG, 1024x1024, 8-bit true colour,
+no more than 1 MiB, with the expected sha256 -- and then copies it to
+``<output>/entry.png``. The output is re-read and compared with the input,
+so the printed digest proves the run produced exactly the shipped bytes.
 
-Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
+Run locally with an output directory of your choice:
+
     mkdir -p out && MAKEFUN_OUTPUT_DIR=out python3 main.py
 
-Deterministic: no network, no clock, no randomness; the same input bytes
-always produce the same output bytes.
+With no MAKEFUN_OUTPUT_DIR set, the program writes to /output, the path
+the grader uses. Only the Python standard library is used: there is no
+network access, no clock and no randomness, so every run is identical.
 """
 
 import hashlib
@@ -18,90 +23,102 @@ import struct
 import sys
 import zlib
 
-PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
-MAX_BYTES = 1_048_576
-EXPECTED_WIDTH = 1024
-EXPECTED_HEIGHT = 1024
+SIGNATURE = b"\x89PNG\r\n\x1a\n"
+SIZE_LIMIT = 1_048_576
+SIZE = (1024, 1024)
+DIGEST = "e781f22b8623980e557d65a1ee2780f9161f8d30f28b2f525eb72ac93224de70"
 
 
-def fail(message):
-    print("error: " + message, file=sys.stderr)
+def abort(reason):
+    """Print a validation failure and stop with a non-zero status."""
+    print("error: " + reason, file=sys.stderr)
     raise SystemExit(1)
 
 
-def validate_png(data):
-    """Check the bytes are a whole PNG with the expected size and dimensions."""
-    if len(data) > MAX_BYTES:
-        fail("entry.png is %d bytes, over the 1 MiB limit" % len(data))
-    if data[:8] != PNG_MAGIC:
-        fail("entry.png does not start with the PNG magic bytes")
-    if len(data) < 33:
-        fail("entry.png is too short to hold a PNG header")
+def chunks(blob):
+    """Yield (kind, payload) for each chunk of a PNG byte string.
 
-    # IHDR chunk: length (4), type (4), width (4), height (4), ...
-    ihdr_length = struct.unpack(">I", data[8:12])[0]
-    ihdr_type = data[12:16]
-    if ihdr_type != b"IHDR" or ihdr_length != 13:
-        fail("entry.png has no valid IHDR chunk")
-    width, height = struct.unpack(">II", data[16:24])
-    if (width, height) != (EXPECTED_WIDTH, EXPECTED_HEIGHT):
-        fail("entry.png is %dx%d, expected 1024x1024" % (width, height))
-    bit_depth, color_type = data[24], data[25]
-    if bit_depth != 8 or color_type not in (2, 6):
-        fail("entry.png has unexpected IHDR bit depth %d / color type %d"
-             % (bit_depth, color_type))
+    Raises through abort() when the chunk framing is broken or a stored
+    CRC does not match the bytes it covers.
+    """
+    pos = 8
+    while pos < len(blob):
+        if pos + 8 > len(blob):
+            abort("truncated chunk header at offset %d" % pos)
+        (size,) = struct.unpack(">I", blob[pos:pos + 4])
+        kind = blob[pos + 4:pos + 8]
+        stop = pos + 8 + size + 4
+        if stop > len(blob):
+            abort("chunk %r runs past the end of the file" % kind)
+        (stored_crc,) = struct.unpack(">I", blob[pos + 8 + size:stop])
+        crc = zlib.crc32(blob[pos + 4:pos + 8 + size]) & 0xFFFFFFFF
+        if crc != stored_crc:
+            abort("chunk %r fails its CRC check" % kind)
+        yield kind, blob[pos + 8:pos + 8 + size]
+        if kind == b"IEND":
+            if stop != len(blob):
+                abort("bytes follow the IEND chunk")
+            return
+        pos = stop
+    abort("no IEND chunk found")
 
-    # Every chunk must carry a correct CRC, and the file must end with IEND.
-    offset = 8
-    seen_iend = False
-    while offset < len(data):
-        if offset + 8 > len(data):
-            fail("entry.png ends in the middle of a chunk header")
-        length = struct.unpack(">I", data[offset:offset + 4])[0]
-        chunk_type = data[offset + 4:offset + 8]
-        end = offset + 8 + length + 4
-        if end > len(data):
-            fail("entry.png ends in the middle of chunk %r" % chunk_type)
-        stored_crc = struct.unpack(">I", data[offset + 8 + length:end])[0]
-        actual_crc = zlib.crc32(data[offset + 4:offset + 8 + length]) & 0xFFFFFFFF
-        if stored_crc != actual_crc:
-            fail("entry.png chunk %r has a bad CRC" % chunk_type)
-        if chunk_type == b"IEND":
-            seen_iend = True
-            if end != len(data):
-                fail("entry.png has trailing bytes after IEND")
-            break
-        offset = end
-    if not seen_iend:
-        fail("entry.png has no IEND chunk")
 
+def inspect(blob):
+    """Return (width, height) after checking the whole PNG is sound."""
+    if len(blob) > SIZE_LIMIT:
+        abort("entry.png is %d bytes, above the 1 MiB cap" % len(blob))
+    if len(blob) < 33 or blob[:8] != SIGNATURE:
+        abort("entry.png lacks the PNG signature")
+
+    seen = list(chunks(blob))
+    kinds = [kind for kind, _ in seen]
+    if not kinds or kinds[0] != b"IHDR":
+        abort("entry.png does not open with an IHDR chunk")
+    if kinds[-1] != b"IEND":
+        abort("entry.png does not close with an IEND chunk")
+    if kinds.count(b"IHDR") != 1:
+        abort("entry.png carries more than one IHDR chunk")
+
+    header = seen[0][1]
+    if len(header) != 13:
+        abort("IHDR chunk is %d bytes, expected 13" % len(header))
+    width, height = struct.unpack(">II", header[0:8])
+    if (width, height) != SIZE:
+        abort("entry.png is %dx%d, expected 1024x1024" % (width, height))
+    if header[8] != 8 or header[9] not in (2, 6):
+        abort("entry.png is not 8-bit true colour (depth %d, type %d)"
+              % (header[8], header[9]))
     return width, height
 
 
-def main():
-    here = os.path.dirname(os.path.abspath(__file__))
-    source = os.path.join(here, "entry.png")
-    output_dir = os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
-    output = os.path.join(output_dir, "entry.png")
+def run():
+    base = os.path.dirname(os.path.abspath(__file__))
+    source = os.path.join(base, "entry.png")
+    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
+    dest = os.path.join(out_dir, "entry.png")
 
     if not os.path.isfile(source):
-        fail("entry.png not found beside main.py")
+        abort("entry.png is missing from the repository")
 
     with open(source, "rb") as handle:
-        data = handle.read()
-    width, height = validate_png(data)
+        blob = handle.read()
+    width, height = inspect(blob)
 
-    os.makedirs(output_dir, exist_ok=True)
-    shutil.copyfile(source, output)
+    digest = hashlib.sha256(blob).hexdigest()
+    if digest != DIGEST:
+        abort("entry.png digest %s does not match the entry" % digest)
 
-    with open(output, "rb") as handle:
-        written = handle.read()
-    if written != data:
-        fail("output bytes differ from entry.png")
+    os.makedirs(out_dir, exist_ok=True)
+    shutil.copyfile(source, dest)
 
-    digest = hashlib.sha256(written).hexdigest()
-    print("entry.png: %dx%d, %d bytes, sha256 %s" % (width, height, len(written), digest))
+    with open(dest, "rb") as handle:
+        copied = handle.read()
+    if copied != blob:
+        abort("the copied file differs from entry.png")
+
+    print("entry.png: %dx%d, %d bytes, sha256 %s"
+          % (width, height, len(copied), digest))
 
 
 if __name__ == "__main__":
-    main()
+    run()
