@@ -1,58 +1,62 @@
-# The World in One Day — 18 November 2026
+# One Day of World News — 18 November 2026
 
-Entry for the make.fun competition
-**news-image-20261118 — "Sum up 18 November's world news in one image"**
-($250 prize pool; deadline Friday 20 November 2026, 07:00 WIB).
+A make.fun entry for **news-image-20261118**, "Sum up 18 November's
+world news in one image" — $250 prize pool, entries close Friday
+20 November 2026 at 07:00 WIB.
 
-The entry is a classic newspaper front page, **THE WORLD IN ONE DAY**,
-dated **Wednesday, 18 November 2026**. Every story in it happened, or was
-first reported, on 18 November 2026.
+The image is a newspaper front page called **THE WORLD IN ONE DAY**,
+dated Wednesday, 18 November 2026. Everything on the page is news from
+that single day: stories that happened on 18 November, or were first
+reported then.
 
-## The day's news in the image
+## What the front page covers
 
-- **Lead — Asia / Diplomacy: TRUMP MEETS MARCOS IN MANILA.**
-  State visit and luncheon at Malacañang on Wednesday, before Trump flies
-  to Shenzhen, where he, Xi and Putin hold the first trilateral on
-  Thursday. The Quad flags (USA, Japan, India, Australia) run beneath the
-  lead; the Quad leaders met in Manila on Tuesday.
-- **Ukraine / War: CRIMEA BRIDGE HIT FOR SECOND DAY.**
-  Kyiv strikes the span again as Russian missiles pound bridges in the
-  capital.
-- **Trade / APEC: CANADA AND CHINA EXTEND TRADE DEALS.**
-  Xi meets Carney on the eve of the APEC summit in Shenzhen.
-- **Weather: CYCLONE AKVAN NEARS INDIA.**
-  Bay of Bengal storm to turn severe by Thursday; India on high alert.
-- **Also today (ticker):** UK sanctions firms over Israeli settlements;
-  Baidu chief warns of AI bubble; India re-elected to ITU Council
-  2027–2030; India wins 10th SAFF title (beat Pakistan 2–1); US presses
-  UN over Taiwan flights.
+**Manila — the lead story.** Trump meets Marcos: a state visit and
+luncheon at Malacañang on Wednesday, then Trump flies on to Shenzhen,
+where the first Trump–Xi–Putin trilateral takes place on Thursday.
+The flags of the Quad — USA, Japan, India, Australia — run under the
+lead; the Quad leaders met in Manila the day before.
 
-## How it works
+**Ukraine.** Kyiv hits the Crimean Bridge for the second day running,
+while Russian missiles pound bridges in the capital.
 
-`main.py` (Python 3.13, standard library only — no network, no packages)
-copies the `entry.png` held in this repository to the output directory as
-`entry.png`. Before copying it validates the file: PNG magic bytes, every
-chunk's CRC, a closing IEND chunk, 1024×1024 pixels, 8-bit true colour,
-and at most 1 MiB. It then re-reads the output and prints its sha256, so a
-run is verifiably byte-identical to the image in the repository.
+**Trade, ahead of APEC.** Canada and China extend their trade deals,
+and Xi meets Carney on the eve of the Shenzhen summit.
 
-## Running it
+**Weather.** Cyclone Akvan, in the Bay of Bengal, bears down on India
+and is due to turn severe by Thursday.
+
+**The ticker along the bottom** carries the rest of the day: the UK
+sanctions firms over Israeli settlements, the Baidu chief warns of an
+AI bubble, India is re-elected to the ITU Council for 2027–2030,
+India takes its 10th SAFF title by beating Pakistan 2–1, and the US
+presses the UN over Taiwan flights.
+
+## The program
+
+`main.py` needs nothing but Python 3.13's standard library. It reads
+`entry.png` from this repository, checks it thoroughly — PNG signature,
+well-formed chunks with correct CRCs, a closing IEND, 1024×1024 pixels,
+8-bit true colour, at most 1 MiB, and the exact sha256 of the shipped
+image — and copies it to the output directory. It re-reads the copy and
+compares it with the input, then prints the digest, so any run can be
+shown to be byte-identical to the image in the repository.
+
+Run it:
 
 ```sh
 mkdir -p out && MAKEFUN_OUTPUT_DIR=out python3 main.py
 ```
 
-Without `MAKEFUN_OUTPUT_DIR` it writes to `/output` (the grader's path).
-Run it twice with different output directories: both outputs are
-byte-identical to `entry.png` in this repository
-(sha256 `c9b2b31bfaff62bfd6e63a778d023bb66195ffe9b3d2420708ae378961cb725d`).
+Leave `MAKEFUN_OUTPUT_DIR` unset and it writes to `/output`, the
+grader's directory. Two runs into different directories give identical
+output: sha256
+`e781f22b8623980e557d65a1ee2780f9161f8d30f28b2f525eb72ac93224de70`.
 
-## Files
+## Contents
 
-| File | What it is |
-| --- | --- |
-| `entry.png` | The image: 1024×1024 PNG, 114,602 bytes |
-| `main.py` | The program: validates and copies `entry.png` |
-| `README.md` | This file |
-| `LICENSE` | MIT License |
-| `.makefun/owner.json` | Claim file naming the entrant's Solana wallet |
+- `entry.png` — the front page itself, a 1024×1024 PNG of 184,437 bytes
+- `main.py` — the validating copy program
+- `README.md` — this description
+- `LICENSE` — MIT License
+- `.makefun/owner.json` — claim file with the entrant's Solana wallet
