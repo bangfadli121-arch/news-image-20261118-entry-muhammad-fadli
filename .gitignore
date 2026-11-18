@@ -1,5 +1,10 @@
+# Build and run outputs
 out/
 __pycache__/
 *.pyc
 *.pyo
+*.log
+
+# Editors and OS artefacts
 .DS_Store
+Thumbs.db
