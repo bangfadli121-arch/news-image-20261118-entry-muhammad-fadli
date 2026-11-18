@@ -1,150 +1,194 @@
 #!/usr/bin/env python3
-"""Emit the 18 November 2026 world-news front page.
+"""news-image-20261118 — reproduce the competition entry image.
 
-``entry.png`` in this repository is the whole entry: a single 1024x1024
-photographic newspaper front page summing up one day of world news.
-This script does not draw anything. It proves the shipped file is the
-real entry -- a well-formed PNG of the right size and the exact bytes
-we submitted -- and then places an identical copy at the output path
-the grader reads.
+Reads entry.png next to this script, validates it (PNG magic, IHDR
+1024x1024, per-chunk CRC, IEND present, size <= 1 MiB), checks its
+SHA-256 against the expected value recorded below, then copies it
+byte-for-byte to /output/entry.png and re-reads the output to confirm
+the SHA-256 is identical.
 
-Behaviour, by design:
+Python 3.13, standard library only — no PIL, no third-party packages.
 
-* only the Python standard library is imported (no network, no clock,
-  no randomness, no third-party packages), so the program runs in the
-  bare harness sandbox;
-* the output directory comes from ``MAKEFUN_OUTPUT_DIR`` and falls back
-  to ``/output``;
-* every run prints one line with the size and sha256 of the emitted
-  file, and two runs into different directories produce byte-identical
-  files.
+Usage:
+    python3 main.py [output_path]
 
-Usage::
-
-    MAKEFUN_OUTPUT_DIR=out python3 main.py
+    output_path defaults to /output/entry.png when omitted. When given,
+    the validated entry image is written to that path instead; its
+    parent directory is created if needed (and must be writable).
 """
 
 import hashlib
 import os
-import shutil
 import struct
 import sys
 import zlib
 
+EXPECTED_SHA256 = "69da07cdd67723144390dcbc2d81593b8c67a4c92bcb0028eb065145d68d9f7c"
+EXPECTED_WIDTH = 1024
+EXPECTED_HEIGHT = 1024
+MAX_SIZE_BYTES = 1 * 1024 * 1024  # 1 MiB
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
-MAX_BYTES = 1_048_576
-EXPECTED_W = 1024
-EXPECTED_H = 1024
-EXPECTED_SHA256 = (
-    "02ef0be82e86b96b98e526e33877d75a6a32a394d6ab431806daa8e8fdd57de0"
-)
+OUTPUT_DIR = "/output"
+OUTPUT_PATH = os.path.join(OUTPUT_DIR, "entry.png")
 
 
-def die(message):
-    """Report a failed check on stderr and stop with a nonzero exit."""
-    print("error: %s" % message, file=sys.stderr)
-    sys.exit(1)
+def sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
-class PngReader:
-    """Walk a PNG byte string chunk by chunk, checking its framing."""
+def validate_png(data: bytes) -> None:
+    """Validate PNG structure: magic, IHDR 1024x1024, chunk CRCs, IEND."""
+    if len(data) > MAX_SIZE_BYTES:
+        raise ValueError(
+            f"entry.png too large: {len(data)} bytes (limit {MAX_SIZE_BYTES})"
+        )
+    if len(data) < 8 or data[:8] != PNG_MAGIC:
+        raise ValueError("not a PNG file: bad magic bytes")
 
-    def __init__(self, data):
-        self.data = data
-        self.offset = len(PNG_MAGIC)
-        self.chunk_kinds = []
-        self.header = None
+    offset = 8
+    seen_ihdr = False
+    seen_iend = False
 
-    def next_chunk(self):
-        """Return the next (kind, payload) pair, or None past IEND."""
-        data = self.data
-        pos = self.offset
-        if pos + 8 > len(data):
-            die("PNG ends inside a chunk header at byte %d" % pos)
-        (payload_len,) = struct.unpack_from(">I", data, pos)
-        kind = data[pos + 4:pos + 8]
-        end = pos + 8 + payload_len + 4
-        if end > len(data):
-            die("chunk %s overruns the file" % kind.decode("latin-1"))
-        (stored,) = struct.unpack_from(">I", data, pos + 8 + payload_len)
-        actual = zlib.crc32(data[pos + 4:pos + 8 + payload_len]) & 0xFFFFFFFF
-        if actual != stored:
-            die("chunk %s has a bad CRC" % kind.decode("latin-1"))
-        self.chunk_kinds.append(kind)
-        self.offset = end
-        return kind, data[pos + 8:pos + 8 + payload_len]
+    while offset < len(data):
+        if offset + 8 > len(data):
+            raise ValueError("truncated PNG chunk header")
+        (length,) = struct.unpack(">I", data[offset : offset + 4])
+        chunk_type = data[offset + 4 : offset + 8]
+        chunk_start = offset + 8
+        chunk_end = chunk_start + length
+        if chunk_end + 4 > len(data):
+            raise ValueError(f"truncated PNG chunk: {chunk_type!r}")
+        chunk_data = data[chunk_start:chunk_end]
+        (stored_crc,) = struct.unpack(">I", data[chunk_end : chunk_end + 4])
+        actual_crc = zlib.crc32(chunk_type + chunk_data) & 0xFFFFFFFF
+        if actual_crc != stored_crc:
+            raise ValueError(
+                f"CRC mismatch in chunk {chunk_type!r}: "
+                f"stored {stored_crc:#010x}, computed {actual_crc:#010x}"
+            )
 
-    def walk(self):
-        """Consume every chunk; return the IHDR payload."""
-        if self.data[:8] != PNG_MAGIC:
-            die("file does not start with the PNG magic bytes")
-        while True:
-            kind, payload = self.next_chunk()
-            if kind == b"IHDR":
-                if self.header is not None:
-                    die("PNG has two IHDR chunks")
-                if len(payload) != 13:
-                    die("IHDR payload is %d bytes, want 13" % len(payload))
-                self.header = payload
-            if kind == b"IEND":
-                if self.offset != len(self.data):
-                    die("trailing bytes after the IEND chunk")
-                break
-        return self.header
+        if chunk_type == b"IHDR":
+            if seen_ihdr:
+                raise ValueError("duplicate IHDR chunk")
+            if length != 13:
+                raise ValueError(f"IHDR has wrong length: {length}")
+            width, height = struct.unpack(">II", chunk_data[:8])
+            if width != EXPECTED_WIDTH or height != EXPECTED_HEIGHT:
+                raise ValueError(
+                    f"IHDR dimensions {width}x{height}, "
+                    f"expected {EXPECTED_WIDTH}x{EXPECTED_HEIGHT}"
+                )
+            seen_ihdr = True
+        elif chunk_type == b"IEND":
+            if length != 0:
+                raise ValueError(f"IEND has wrong length: {length}")
+            seen_iend = True
+            offset = chunk_end + 4
+            break
 
+        offset = chunk_end + 4
 
-def check_image(data):
-    """Validate the candidate entry bytes; return (width, height)."""
-    if len(data) > MAX_BYTES:
-        die("entry image is %d bytes, over the 1 MiB limit" % len(data))
-    if len(data) < 8 + 25 + 12:
-        die("entry image is too short to be a PNG")
-    reader = PngReader(data)
-    header = reader.walk()
-    kinds = reader.chunk_kinds
-    if not kinds or kinds[0] != b"IHDR":
-        die("first chunk is not IHDR")
-    if kinds[-1] != b"IEND":
-        die("last chunk is not IEND")
-    width, height = struct.unpack_from(">II", header, 0)
-    if (width, height) != (EXPECTED_W, EXPECTED_H):
-        die("image is %dx%d, want 1024x1024" % (width, height))
-    depth, colour = header[8], header[9]
-    if depth != 8 or colour not in (2, 6):
-        die("image is not 8-bit RGB/RGBA (depth %d, colour %d)"
-            % (depth, colour))
-    return width, height
+    if not seen_ihdr:
+        raise ValueError("missing IHDR chunk")
+    if not seen_iend:
+        raise ValueError("missing IEND chunk")
+    if offset != len(data):
+        raise ValueError(f"trailing bytes after IEND: {len(data) - offset}")
 
 
-def main():
-    here = os.path.dirname(os.path.abspath(__file__))
-    src = os.path.join(here, "entry.png")
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
-    dst = os.path.join(out_dir, "entry.png")
+def resolve_output_path(argv) -> str:
+    """Resolve the output path from argv.
 
+    ``argv`` holds the command-line arguments after the script name.
+    At most one argument is accepted: an explicit output file path.
+    With no argument the default /output/entry.png is used.
+    """
+    if len(argv) > 1:
+        raise ValueError(
+            "too many arguments: usage: python3 main.py [output_path]"
+        )
+    if len(argv) == 1:
+        output_path = argv[0]
+        if not output_path:
+            raise ValueError("output_path must not be empty")
+        return output_path
+    return OUTPUT_PATH
+
+
+def ensure_output_dir_writable(output_path: str) -> str:
+    """Create the output file's parent directory and check it is writable.
+
+    Returns the directory path. Raises ValueError with a clear message
+    when the directory cannot be created or is not writable, so the
+    failure is reported before any bytes are written.
+    """
+    out_dir = os.path.dirname(os.path.abspath(output_path)) or "."
     try:
-        with open(src, "rb") as handle:
-            raw = handle.read()
-    except OSError:
-        die("cannot read entry.png from the repository")
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as exc:
+        raise ValueError(
+            f"cannot create output directory {out_dir!r}: {exc}"
+        ) from exc
+    if not os.path.isdir(out_dir):
+        raise ValueError(
+            f"output directory {out_dir!r} does not exist "
+            f"and could not be created"
+        )
+    if not os.access(out_dir, os.W_OK):
+        raise ValueError(
+            f"output directory {out_dir!r} is not writable"
+        )
+    return out_dir
 
-    width, height = check_image(raw)
 
-    fingerprint = hashlib.sha256(raw).hexdigest()
-    if fingerprint != EXPECTED_SHA256:
-        die("sha256 %s is not the submitted entry" % fingerprint)
+def main(argv=None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    output_path = resolve_output_path(argv)
 
-    os.makedirs(out_dir, exist_ok=True)
-    shutil.copyfile(src, dst)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    entry_path = os.path.join(script_dir, "entry.png")
 
-    with open(dst, "rb") as handle:
-        emitted = handle.read()
-    if emitted != raw:
-        die("output file differs from entry.png")
+    with open(entry_path, "rb") as f:
+        data = f.read()
 
-    print("entry.png: %dx%d, %d bytes, sha256 %s"
-          % (width, height, len(emitted), fingerprint))
+    validate_png(data)
+
+    digest = sha256_hex(data)
+    if digest != EXPECTED_SHA256:
+        raise ValueError(
+            f"SHA-256 mismatch for entry.png:\n"
+            f"  got      {digest}\n"
+            f"  expected {EXPECTED_SHA256}"
+        )
+
+    ensure_output_dir_writable(output_path)
+    try:
+        with open(output_path, "wb") as f:
+            f.write(data)
+    except OSError as exc:
+        raise ValueError(
+            f"cannot write output file {output_path!r}: {exc}"
+        ) from exc
+
+    with open(output_path, "rb") as f:
+        out_data = f.read()
+    out_digest = sha256_hex(out_data)
+    if out_digest != digest:
+        raise ValueError(
+            f"output SHA-256 mismatch: {out_digest} != {digest}"
+        )
+
+    print(f"entry.png: {len(data)} bytes")
+    print(f"sha256: {digest}")
+    print(f"output: {output_path} ({len(out_data)} bytes, sha256 {out_digest})")
+    print("OK: output is byte-identical to entry.png")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        sys.exit(main())
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
