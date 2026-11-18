@@ -1,19 +1,27 @@
 #!/usr/bin/env python3
-"""Copy the news-image-20261118 entry image to the output directory.
+"""Emit the 18 November 2026 world-news front page.
 
-The image lives in this repository as entry.png. The program checks it is
-really the entry image -- a complete PNG, 1024x1024, 8-bit true colour,
-no more than 1 MiB, with the expected sha256 -- and then copies it to
-``<output>/entry.png``. The output is re-read and compared with the input,
-so the printed digest proves the run produced exactly the shipped bytes.
+``entry.png`` in this repository is the whole entry: a single 1024x1024
+photographic newspaper front page summing up one day of world news.
+This script does not draw anything. It proves the shipped file is the
+real entry -- a well-formed PNG of the right size and the exact bytes
+we submitted -- and then places an identical copy at the output path
+the grader reads.
 
-Run locally with an output directory of your choice:
+Behaviour, by design:
 
-    mkdir -p out && MAKEFUN_OUTPUT_DIR=out python3 main.py
+* only the Python standard library is imported (no network, no clock,
+  no randomness, no third-party packages), so the program runs in the
+  bare harness sandbox;
+* the output directory comes from ``MAKEFUN_OUTPUT_DIR`` and falls back
+  to ``/output``;
+* every run prints one line with the size and sha256 of the emitted
+  file, and two runs into different directories produce byte-identical
+  files.
 
-With no MAKEFUN_OUTPUT_DIR set, the program writes to /output, the path
-the grader uses. Only the Python standard library is used: there is no
-network access, no clock and no randomness, so every run is identical.
+Usage::
+
+    MAKEFUN_OUTPUT_DIR=out python3 main.py
 """
 
 import hashlib
@@ -23,102 +31,120 @@ import struct
 import sys
 import zlib
 
-SIGNATURE = b"\x89PNG\r\n\x1a\n"
-SIZE_LIMIT = 1_048_576
-SIZE = (1024, 1024)
-DIGEST = "e781f22b8623980e557d65a1ee2780f9161f8d30f28b2f525eb72ac93224de70"
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+MAX_BYTES = 1_048_576
+EXPECTED_W = 1024
+EXPECTED_H = 1024
+EXPECTED_SHA256 = (
+    "02ef0be82e86b96b98e526e33877d75a6a32a394d6ab431806daa8e8fdd57de0"
+)
 
 
-def abort(reason):
-    """Print a validation failure and stop with a non-zero status."""
-    print("error: " + reason, file=sys.stderr)
-    raise SystemExit(1)
+def die(message):
+    """Report a failed check on stderr and stop with a nonzero exit."""
+    print("error: %s" % message, file=sys.stderr)
+    sys.exit(1)
 
 
-def chunks(blob):
-    """Yield (kind, payload) for each chunk of a PNG byte string.
+class PngReader:
+    """Walk a PNG byte string chunk by chunk, checking its framing."""
 
-    Raises through abort() when the chunk framing is broken or a stored
-    CRC does not match the bytes it covers.
-    """
-    pos = 8
-    while pos < len(blob):
-        if pos + 8 > len(blob):
-            abort("truncated chunk header at offset %d" % pos)
-        (size,) = struct.unpack(">I", blob[pos:pos + 4])
-        kind = blob[pos + 4:pos + 8]
-        stop = pos + 8 + size + 4
-        if stop > len(blob):
-            abort("chunk %r runs past the end of the file" % kind)
-        (stored_crc,) = struct.unpack(">I", blob[pos + 8 + size:stop])
-        crc = zlib.crc32(blob[pos + 4:pos + 8 + size]) & 0xFFFFFFFF
-        if crc != stored_crc:
-            abort("chunk %r fails its CRC check" % kind)
-        yield kind, blob[pos + 8:pos + 8 + size]
-        if kind == b"IEND":
-            if stop != len(blob):
-                abort("bytes follow the IEND chunk")
-            return
-        pos = stop
-    abort("no IEND chunk found")
+    def __init__(self, data):
+        self.data = data
+        self.offset = len(PNG_MAGIC)
+        self.chunk_kinds = []
+        self.header = None
+
+    def next_chunk(self):
+        """Return the next (kind, payload) pair, or None past IEND."""
+        data = self.data
+        pos = self.offset
+        if pos + 8 > len(data):
+            die("PNG ends inside a chunk header at byte %d" % pos)
+        (payload_len,) = struct.unpack_from(">I", data, pos)
+        kind = data[pos + 4:pos + 8]
+        end = pos + 8 + payload_len + 4
+        if end > len(data):
+            die("chunk %s overruns the file" % kind.decode("latin-1"))
+        (stored,) = struct.unpack_from(">I", data, pos + 8 + payload_len)
+        actual = zlib.crc32(data[pos + 4:pos + 8 + payload_len]) & 0xFFFFFFFF
+        if actual != stored:
+            die("chunk %s has a bad CRC" % kind.decode("latin-1"))
+        self.chunk_kinds.append(kind)
+        self.offset = end
+        return kind, data[pos + 8:pos + 8 + payload_len]
+
+    def walk(self):
+        """Consume every chunk; return the IHDR payload."""
+        if self.data[:8] != PNG_MAGIC:
+            die("file does not start with the PNG magic bytes")
+        while True:
+            kind, payload = self.next_chunk()
+            if kind == b"IHDR":
+                if self.header is not None:
+                    die("PNG has two IHDR chunks")
+                if len(payload) != 13:
+                    die("IHDR payload is %d bytes, want 13" % len(payload))
+                self.header = payload
+            if kind == b"IEND":
+                if self.offset != len(self.data):
+                    die("trailing bytes after the IEND chunk")
+                break
+        return self.header
 
 
-def inspect(blob):
-    """Return (width, height) after checking the whole PNG is sound."""
-    if len(blob) > SIZE_LIMIT:
-        abort("entry.png is %d bytes, above the 1 MiB cap" % len(blob))
-    if len(blob) < 33 or blob[:8] != SIGNATURE:
-        abort("entry.png lacks the PNG signature")
-
-    seen = list(chunks(blob))
-    kinds = [kind for kind, _ in seen]
+def check_image(data):
+    """Validate the candidate entry bytes; return (width, height)."""
+    if len(data) > MAX_BYTES:
+        die("entry image is %d bytes, over the 1 MiB limit" % len(data))
+    if len(data) < 8 + 25 + 12:
+        die("entry image is too short to be a PNG")
+    reader = PngReader(data)
+    header = reader.walk()
+    kinds = reader.chunk_kinds
     if not kinds or kinds[0] != b"IHDR":
-        abort("entry.png does not open with an IHDR chunk")
+        die("first chunk is not IHDR")
     if kinds[-1] != b"IEND":
-        abort("entry.png does not close with an IEND chunk")
-    if kinds.count(b"IHDR") != 1:
-        abort("entry.png carries more than one IHDR chunk")
-
-    header = seen[0][1]
-    if len(header) != 13:
-        abort("IHDR chunk is %d bytes, expected 13" % len(header))
-    width, height = struct.unpack(">II", header[0:8])
-    if (width, height) != SIZE:
-        abort("entry.png is %dx%d, expected 1024x1024" % (width, height))
-    if header[8] != 8 or header[9] not in (2, 6):
-        abort("entry.png is not 8-bit true colour (depth %d, type %d)"
-              % (header[8], header[9]))
+        die("last chunk is not IEND")
+    width, height = struct.unpack_from(">II", header, 0)
+    if (width, height) != (EXPECTED_W, EXPECTED_H):
+        die("image is %dx%d, want 1024x1024" % (width, height))
+    depth, colour = header[8], header[9]
+    if depth != 8 or colour not in (2, 6):
+        die("image is not 8-bit RGB/RGBA (depth %d, colour %d)"
+            % (depth, colour))
     return width, height
 
 
-def run():
-    base = os.path.dirname(os.path.abspath(__file__))
-    source = os.path.join(base, "entry.png")
+def main():
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = os.path.join(here, "entry.png")
     out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
-    dest = os.path.join(out_dir, "entry.png")
+    dst = os.path.join(out_dir, "entry.png")
 
-    if not os.path.isfile(source):
-        abort("entry.png is missing from the repository")
+    try:
+        with open(src, "rb") as handle:
+            raw = handle.read()
+    except OSError:
+        die("cannot read entry.png from the repository")
 
-    with open(source, "rb") as handle:
-        blob = handle.read()
-    width, height = inspect(blob)
+    width, height = check_image(raw)
 
-    digest = hashlib.sha256(blob).hexdigest()
-    if digest != DIGEST:
-        abort("entry.png digest %s does not match the entry" % digest)
+    fingerprint = hashlib.sha256(raw).hexdigest()
+    if fingerprint != EXPECTED_SHA256:
+        die("sha256 %s is not the submitted entry" % fingerprint)
 
     os.makedirs(out_dir, exist_ok=True)
-    shutil.copyfile(source, dest)
+    shutil.copyfile(src, dst)
 
-    with open(dest, "rb") as handle:
-        copied = handle.read()
-    if copied != blob:
-        abort("the copied file differs from entry.png")
+    with open(dst, "rb") as handle:
+        emitted = handle.read()
+    if emitted != raw:
+        die("output file differs from entry.png")
 
     print("entry.png: %dx%d, %d bytes, sha256 %s"
-          % (width, height, len(copied), digest))
+          % (width, height, len(emitted), fingerprint))
 
 
 if __name__ == "__main__":
-    run()
+    main()
